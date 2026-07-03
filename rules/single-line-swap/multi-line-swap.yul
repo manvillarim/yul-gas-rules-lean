@@ -2,7 +2,7 @@
 /// @use-src 0:"A.sol"
 object "A_53" {
     code {
-        /// @src 0:107:618  "contract A {..."
+        /// @src 0:107:598  "contract A {..."
         mstore(64, memoryguard(128))
         if callvalue() { revert_error_ca66f745a3ce8ff40e2ccaf1ad45db7774001b90d25810abd9040049be7bf4bb() }
 
@@ -21,19 +21,19 @@ object "A_53" {
             revert(0, 0)
         }
 
-        /// @src 0:107:618  "contract A {..."
+        /// @src 0:107:598  "contract A {..."
         function constructor_A_53() {
 
-            /// @src 0:107:618  "contract A {..."
+            /// @src 0:107:598  "contract A {..."
 
         }
-        /// @src 0:107:618  "contract A {..."
+        /// @src 0:107:598  "contract A {..."
 
     }
     /// @use-src 0:"A.sol"
     object "A_53_deployed" {
         code {
-            /// @src 0:107:618  "contract A {..."
+            /// @src 0:107:598  "contract A {..."
             mstore(64, memoryguard(128))
 
             if iszero(lt(calldatasize(), 4))
@@ -181,7 +181,7 @@ object "A_53" {
                 ret := read_from_storage_split_dynamic_t_address(slot, offset)
 
             }
-            /// @src 0:107:618  "contract A {..."
+            /// @src 0:107:598  "contract A {..."
 
             function cleanup_t_uint160(value) -> cleaned {
                 cleaned := and(value, 0xffffffffffffffffffffffffffffffffffffffff)
@@ -236,7 +236,7 @@ object "A_53" {
                 ret := read_from_storage_split_dynamic_t_uint256(slot, offset)
 
             }
-            /// @src 0:107:618  "contract A {..."
+            /// @src 0:107:598  "contract A {..."
 
             function abi_encode_tuple_t_uint256__to_t_uint256__fromStack(headStart , value0) -> tail {
                 tail := add(headStart, 32)
@@ -339,7 +339,7 @@ object "A_53" {
             }
 
             /// @ast-id 52
-            /// @src 0:182:616  "function f(uint256 x, uint256 y) external returns (uint256, uint256) {..."
+            /// @src 0:182:596  "function f(uint256 x, uint256 y) external returns (uint256, uint256) {..."
             function fun_f_52(var_x_7, var_y_9) -> var__12, var__14 {
                 /// @src 0:233:240  "uint256"
                 let zero_t_uint256_1 := zero_value_for_split_t_uint256()
@@ -363,56 +363,56 @@ object "A_53" {
                 let expr_27 := _4
                 /// @src 0:363:379  "uint256 varB = y"
                 let var_varB_26 := expr_27
-                /// @src 0:436:440  "varA"
+                /// @src 0:437:441  "varA"
                 let _5 := var_varA_22
                 let expr_31 := _5
-                /// @src 0:422:440  "uint256 tmp = varA"
+                /// @src 0:423:441  "uint256 tmp = varA"
                 let var_tmp_30 := expr_31
-                /// @src 0:457:461  "varB"
+                /// @src 0:458:462  "varB"
                 let _6 := var_varB_26
                 let expr_34 := _6
-                /// @src 0:450:461  "varA = varB"
+                /// @src 0:451:462  "varA = varB"
                 var_varA_22 := expr_34
                 let expr_35 := expr_34
-                /// @src 0:547:551  "varA"
-                let _7 := var_varA_22
+                /// @src 0:479:482  "tmp"
+                let _7 := var_tmp_30
                 let expr_38 := _7
-                /// @src 0:554:558  "varB"
-                let _8 := var_varB_26
-                let expr_39 := _8
-                /// @src 0:547:558  "varA + varB"
-                let expr_40 := checked_add_t_uint256(expr_38, expr_39)
+                /// @src 0:472:482  "varB = tmp"
+                var_varB_26 := expr_38
+                let expr_39 := expr_38
+                /// @src 0:548:552  "varA"
+                let _8 := var_varA_22
+                let expr_42 := _8
+                /// @src 0:555:559  "varB"
+                let _9 := var_varB_26
+                let expr_43 := _9
+                /// @src 0:548:559  "varA + varB"
+                let expr_44 := checked_add_t_uint256(expr_42, expr_43)
 
-                /// @src 0:539:558  "total = varA + varB"
-                update_storage_value_offset_0t_uint256_to_t_uint256(0x01, expr_40)
-                let expr_41 := expr_40
-                /// @src 0:576:579  "tmp"
-                let _9 := var_tmp_30
-                let expr_44 := _9
-                /// @src 0:569:579  "varB = tmp"
-                var_varB_26 := expr_44
+                /// @src 0:540:559  "total = varA + varB"
+                update_storage_value_offset_0t_uint256_to_t_uint256(0x01, expr_44)
                 let expr_45 := expr_44
-                /// @src 0:598:602  "varA"
+                /// @src 0:578:582  "varA"
                 let _10 := var_varA_22
                 let expr_47 := _10
-                /// @src 0:597:609  "(varA, varB)"
+                /// @src 0:577:589  "(varA, varB)"
                 let expr_49_component_1 := expr_47
-                /// @src 0:604:608  "varB"
+                /// @src 0:584:588  "varB"
                 let _11 := var_varB_26
                 let expr_48 := _11
-                /// @src 0:597:609  "(varA, varB)"
+                /// @src 0:577:589  "(varA, varB)"
                 let expr_49_component_2 := expr_48
-                /// @src 0:590:609  "return (varA, varB)"
+                /// @src 0:570:589  "return (varA, varB)"
                 var__12 := expr_49_component_1
                 var__14 := expr_49_component_2
                 leave
 
             }
-            /// @src 0:107:618  "contract A {..."
+            /// @src 0:107:598  "contract A {..."
 
         }
 
-        data ".metadata" hex"a2646970667358221220a300a252bbfa805683eba9b661093dc2399dff9713eac9b4fd25f7ecc743346964736f6c634300081a0033"
+        data ".metadata" hex"a26469706673582212207789ea84913d615f2be11a7629d47d72d1a517b55d716ab52ca1094e676c20b164736f6c634300081a0033"
     }
 
 }

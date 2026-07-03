@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// P ; tmp = varA ; varA = varB ; Q ; varB = tmp
+// P ; tmp = varA ; varA = varB ; varB = tmp ; Q
 contract A {
     address public lastCaller;
     uint256 public total;
@@ -13,14 +13,13 @@ contract A {
         uint256 varA = x;
         uint256 varB = y;
 
-        // the swap (temp form)
+        // the swap (temp form) 
         uint256 tmp = varA;
         varA = varB;
-
-        // Q : statements after "varA = varB", before "varB = tmp"
-        total = varA + varB;
-
         varB = tmp;
+
+        // Q : statements after the FULL swap 
+        total = varA + varB;
 
         return (varA, varB);
     }
