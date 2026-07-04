@@ -1,32 +1,17 @@
 /-
-  Core.lean — reusable foundation for verifying Solidity/Yul refactoring laws
-  against the EVMYulLean interpreter.
+  A reusable foundation for the mechanised verification of semantics-preserving
+  source-to-source transformations against the EVMYulLean interpreter.
 
-  This module factors out everything from the Law1 proof that is NOT specific to
-  the "require → custom error" transformation.  Each law (Law1, the Single-Line
-  Swap of Rule 0.1, guard-normalisation laws, etc.) imports `Core` and only has
-  to supply its own *core lemma* (the fact that distinguishes its two sides),
-  then assembles the top-level theorem from the generic pieces below.
+  The module isolates the transformation-independent infrastructure: equivalence
+  relations on statement blocks, the bridge from the fuel-indexed evaluator to the
+  observable top-level semantics, congruence under a shared statement prefix, and
+  a fuel-monotonicity-free induction principle for straight-line prefixes. A
+  concrete transformation is verified by importing this module, establishing the
+  single semantic fact that distinguishes its two program forms, and composing
+  that fact with the generic results developed here.
 
-  ─────────────────────────────────────────────────────────────────────────────
-  WHAT A NEW LAW REUSES FROM HERE
-  ─────────────────────────────────────────────────────────────────────────────
-    • Equivalence relations:   ObservationalEquivalence, EventuallyObsEquiv.
-    • Top-level bridge:        execTopLevel_of_exec_eq, eventuallyObsEquiv_of_*.
-    • Shared context:          exec_block_prefix_congr (shared prefix P),
-                               exec_block_postfix via the continuation `k`.
-    • Straight-line reasoning: RunsOk, and the induction skeleton used to thread
-                               a straight-line prefix that ends in `.ok`.
-    • Local `if` congruence for guard-normalisation laws.
-
-  WHAT A NEW LAW MUST SUPPLY
-  ─────────────────────────────────────────────────────────────────────────────
-    • Its *core lemma*: the single fact that its two local fragments coincide
-      (Law1: REVERT discards payload; Rule 0.1: swap-with-temp = simultaneous
-      assignment; guard laws: two guards evaluate equally).  Everything else is
-      assembled from Core.
-
-  NO `sorry`, NO `axiom` anywhere in this file.
+  The development contains no uses of `sorry` or `axiom`; all results are proved
+  in the ambient logic and machine-checked by the Lean 4 kernel.
 -/
 
 import EvmYul.Yul.Ast
@@ -44,16 +29,15 @@ set_option autoImplicit false
 
 namespace Core
 
-/- ============================================================================
-   SECTION 1 — EQUIVALENCE RELATIONS
+/-
+  Equivalence relations on statement blocks.
 
-   Two programs (blocks of Yul statements) can be compared at three strengths:
-     • ObservationalEquivalence : equal top-level outcome at EVERY fuel.
-       Use when the two sides consume identical fuel (e.g. same-length bodies).
-     • EventuallyObsEquiv       : equal top-level outcome for all fuel ≥ N.
-       Use when the two sides differ in gas cost (e.g. Law1 R ≠ S).
-   Both are defined on `execTopLevel`, the observable entry point.
-   ============================================================================ -/
+  Two programs are compared at two strengths, both defined on the observable
+  entry point `execTopLevel`. Observational equivalence requires agreement at
+  every fuel value and is appropriate when the two program forms consume identical
+  fuel. Eventual observational equivalence requires agreement only beyond some
+  fuel threshold and accommodates forms whose evaluation costs differ.
+-/
 
 /-- Two statement blocks give the same top-level result at every fuel. -/
 def ObservationalEquivalence (stmts₁ stmts₂ : List Stmt) : Prop :=
@@ -65,29 +49,30 @@ def EventuallyObsEquiv (stmts₁ stmts₂ : List Stmt) : Prop :=
   ∀ s : Yul.State, ∃ N, ∀ n, N ≤ n →
     execTopLevel n (.Block stmts₁) s = execTopLevel n (.Block stmts₂) s
 
-/-- `ObservationalEquivalence` is stronger: it implies the eventual form. -/
+/-- Observational equivalence implies its eventual form. -/
 theorem eventually_of_observational {stmts₁ stmts₂ : List Stmt}
     (h : ObservationalEquivalence stmts₁ stmts₂) :
     EventuallyObsEquiv stmts₁ stmts₂ :=
   fun s => ⟨0, fun n _ => h n s⟩
 
-/- ============================================================================
-   SECTION 2 — TOP-LEVEL BRIDGE
+/-
+  From the evaluator to the observable semantics.
 
-   `execTopLevel` is a non-recursive wrapper over `exec`.  These lemmas move an
-   equality/eventual-equality obtained at the `exec` level up to the observable
-   `execTopLevel` level.  Every law's final theorem passes through here.
-   ============================================================================ -/
+  `execTopLevel` is a non-recursive wrapper over the fuel-indexed evaluator
+  `exec`. The following results transport an equality, or an eventual equality,
+  established at the level of `exec` up to the observable level of `execTopLevel`.
+  Every top-level equivalence theorem factors through them.
+-/
 
 /-- If two statements give the same `exec` result (no code override), they give
-    the same `execTopLevel` result.  The workhorse for all-fuel laws. -/
+    the same `execTopLevel` result.  This is the principal tool for equivalences that hold at every fuel value. -/
 theorem execTopLevel_of_exec_eq {fuel : ℕ} {stmt₁ stmt₂ : Stmt} {s : Yul.State}
     (h : exec fuel stmt₁ .none s = exec fuel stmt₂ .none s) :
     execTopLevel fuel stmt₁ s = execTopLevel fuel stmt₂ s := by
   unfold execTopLevel; rw [h]
 
 /-- If two blocks eventually give the same `exec` result, they are eventually
-    observationally equivalent.  The workhorse for gas-abstracted laws. -/
+    observationally equivalent.  This is the principal tool for equivalences that hold only beyond a fuel threshold. -/
 theorem eventuallyObsEquiv_of_exec_eventually_eq
     (stmts₁ stmts₂ : List Stmt)
     (h : ∀ s, ∃ N, ∀ n, N ≤ n →
@@ -99,24 +84,19 @@ theorem eventuallyObsEquiv_of_exec_eventually_eq
   unfold execTopLevel
   rw [hN n hn]
 
-/- ============================================================================
-   SECTION 3 — SHARED CONTEXT (PREFIX P AND POSTFIX Q)
+/-
+  Congruence under a shared context.
 
-   Almost every law has the shape
+  A transformation typically has the shape `P ++ F ++ Q`, where the surrounding
+  statements `P` and `Q` are common to both program forms and only the fragment
+  `F` differs. The following result establishes that prepending a common prefix
+  preserves equality of evaluation, allowing a proof to concern itself with the
+  fragment alone and then lift the conclusion through the shared context.
+-/
 
-       P ++ [ local-fragment ] ++ Q         (require/custom, swap, guard, …)
-
-   where P (statements before) and Q (statements after) are IDENTICAL on both
-   sides and only the local fragment differs.  These lemmas let a law prove its
-   claim about the fragment alone, then lift it through the shared P and Q.
-
-   This is what Rule 0.1 (Single-Line Swap) needs directly: it has shared P and Q
-   around the swap fragment.
-   ============================================================================ -/
-
-/-- **Shared prefix congruence.**  If two blocks agree (at every fuel and state),
-    prepending the SAME prefix `pre` preserves the agreement.
-    Induction on `pre`: peel the head, branch on its result. -/
+/-- Congruence under a shared prefix. If two blocks agree at every fuel and state,
+    then prepending a common prefix preserves that agreement.
+    The proof is by induction on the prefix, analysing the result of its head. -/
 theorem exec_block_prefix_congr (pre : List Stmt) (co : Option YulContract)
     (stmts₁ stmts₂ : List Stmt)
     (h : ∀ fuel s, exec fuel (.Block stmts₁) co s =
@@ -135,51 +115,43 @@ theorem exec_block_prefix_congr (pre : List Stmt) (co : Option YulContract)
       | .error e => simp
       | .ok s₁   => simp; exact ih n s₁
 
-/- ============================================================================
-   SECTION 4 — NAMED ONE-STEP REDUCTIONS OF `exec`
+/-
+  A remark on single-step reductions of `exec`.
 
-   `exec` reduces one level via `rw [Yul.exec]` (one constructor at a time).
-   We deliberately do NOT wrap the block-cons / block-nil reductions as standalone
-   lemmas here: Lean generates a fresh match-eliminator for each such statement,
-   whose motive does not syntactically match a hand-written `match`, so the
-   equality does not close by `rfl`.  Laws that need to reduce a block should call
-   `rw [Yul.exec]` (or `simp only [Yul.exec]`) directly at the point of use, where
-   the surrounding goal provides the motive.  `exec_block_prefix_congr` (Section 3)
-   already packages the common block-cons reasoning in reusable form.
-   ============================================================================ -/
+  One level of `exec` is unfolded by rewriting with its defining equation. We do
+  not package the block reductions as standalone lemmas: the elaborator generates
+  a distinct match-eliminator for each such reduction, whose motive does not
+  syntactically coincide with a hand-written pattern match, so the corresponding
+  equation does not hold definitionally. Reductions are therefore performed at the
+  point of use, where the surrounding goal supplies the motive; the recurring
+  block-cons reasoning is already captured by the shared-prefix congruence above.
+-/
 
-/- ============================================================================
-   SECTION 5 — STRAIGHT-LINE PREFIX REASONING
+/-
+  Reasoning about straight-line prefixes.
 
-   Many laws have a fragment of the form  R ++ [terminator]  where `R` is a
-   straight-line block that must run to `.ok` for the terminator to be reached.
-   `RunsOk R` packages that proviso; the induction skeleton
-   `runsOk_append_elim` threads a straight-line `.ok` prefix through a block-cons
-   chain at a length-dependent fuel — WITHOUT fuel-monotonicity.
+  Several transformations involve a fragment of the form `R ++ tail`, where `R` is
+  a straight-line block that must terminate successfully for control to reach the
+  terminator. The predicate `RunsOk` captures this hypothesis. The principle below
+  threads a successful straight-line prefix through the block-cons structure at a
+  fuel bound depending on the prefix length, and in particular avoids any appeal
+  to monotonicity of `exec` in the fuel parameter.
+-/
 
-   Law1 uses this to reach its `revert`; a swap law could use it to reach the
-   assignment; etc.
-   ============================================================================ -/
-
-/-- Straight-line proviso: beyond a threshold, from any state, running the block
-    `R` returns `.ok`.  Encodes "R does not revert, does not loop, does not
-    break/continue/leave". -/
+/-- The straight-line hypothesis on a block `R`: beyond some fuel threshold, and
+    from every state, evaluation of `R` succeeds. This excludes, in a single
+    condition, reversion, non-termination, and non-local control transfer. -/
 def RunsOk (R : List Stmt) : Prop :=
   ∃ N : ℕ, ∀ fuel : ℕ, N ≤ fuel → ∀ s : Yul.State,
     ∃ s', exec fuel (.Block R) .none s = .ok s'
 
-/-- **Straight-line elimination (fixed-fuel induction, NO exec_mono).**
-    If the prefix `R` runs to `.ok` at fuel `f` (with `f ≥ R.length + k` for the
-    terminator's own fuel need `k`), then executing `R ++ tail` reduces to
-    executing `tail` from `R`'s exit state — captured here as: the block
-    `R ++ tail` reverts/behaves exactly as `tail` does after `R`.
-
-    We expose the general driver as a hypothesis-parameterised lemma: given that
-    the singleton `tail` block yields value `v` from every state at the working
-    fuel, and `R` runs to `.ok`, the whole `R ++ tail` yields `v`.
-
-    Concretely a law instantiates `tail` with its terminator (e.g. `[revert]`)
-    and `hTail` with the terminator's own reduction lemma. -/
+/-- Elimination principle for a straight-line prefix, by induction on the prefix
+    at a fixed fuel and without recourse to fuel monotonicity. Suppose the block
+    `tail` evaluates to a fixed result `v` from every state at any sufficiently
+    large fuel, and the prefix `R` evaluates successfully. Then `R ++ tail`
+    evaluates to `v`, provided the fuel exceeds the length of `R` by the margin
+    required by `tail`. A concrete transformation instantiates `tail` with its
+    terminator and `hTail` with the terminator's reduction lemma. -/
 theorem exec_prefix_then_tail
     (v : Except Yul.Exception Yul.State)
     (tail : List Stmt)
@@ -211,19 +183,19 @@ theorem exec_prefix_then_tail
       have := ih g s₁ hok' (by simp only [List.length_cons] at hf; omega)
       exact this
 
-/- ============================================================================
-   SECTION 6 — LOCAL `if` EQUIVALENCE (guard laws)
+/-
+  Congruence of the conditional statement.
 
-   For laws that replace one guarded block by another (Law1's require→custom,
-   and any guard-normalisation law such as `iszero(iszero B) ≡ B`, De Morgan,
-   `x>0 ≡ x≠0`), this generic lemma reduces the obligation to two local facts:
-     • hguard  — the two guards evaluate identically from any state;
-     • hbodies — the two bodies are observationally interchangeable.
-   ============================================================================ -/
+  For transformations that replace one guarded block by another — the elimination
+  of a `require` in favour of an explicit conditional revert, or a normalisation of
+  the guard expression such as the elimination of a double negation — the following
+  result reduces the obligation to two local facts: that the two guards evaluate
+  identically from every state, and that the two branch bodies are interchangeable.
+-/
 
-/-- **Generic local `if` equivalence.**  Replacing `if condM { bodyM }` by
-    `if condE { bodyE }` before a continuation `k` preserves behaviour when the
-    guards evaluate identically and the bodies are interchangeable. -/
+/-- Congruence for the conditional statement. Replacing `if condM { bodyM }` by
+    `if condE { bodyE }` ahead of a continuation `k` preserves evaluation whenever
+    the guards evaluate identically and the branch bodies are interchangeable. -/
 theorem if_local_congr
     (gas : ℕ) (co : Option YulContract) (s : Yul.State)
     (condM condE : Expr) (bodyM bodyE k : List Stmt)

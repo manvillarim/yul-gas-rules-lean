@@ -1,5 +1,18 @@
 /-
-  Law1: Replace `require(B, M)` with Custom Error `revert E()`
+  Verification of the transformation that replaces a `require(B, M)` statement by
+  an explicit guarded revert `if (¬B) { revert E() }`.
+
+  Both program forms compile to a Yul conditional `if iszero(B) { body }` whose
+  body encodes the failure and terminates in a `revert`. Two results are
+  established. When the two bodies coincide, the forms are observationally
+  equivalent at every fuel value. When the bodies differ — as they do for a
+  string-encoded `require` message versus a four-byte custom-error selector — the
+  forms are eventually observationally equivalent, under the hypothesis that each
+  body eventually reverts. The latter hypothesis is discharged, for straight-line
+  bodies, from the reusable straight-line elimination principle, without any
+  appeal to fuel monotonicity.
+
+  The development contains no uses of `sorry` or `axiom`.
 -/
 
 import EvmYul.Yul.Ast
@@ -144,29 +157,31 @@ theorem require_custom_error_observationally_equiv
   exact exec_block_if_revert_all_fuel .none B enc a₁ b₁ a₂ b₂ Q fuel' s'
 
 
-/- ============================================================================
-   R ≠ S — SELF-CONTAINED via `EventuallyReverts` (NO `exec_mono` needed).
+/-
+  The case of distinct branch bodies.
 
-   The `hExecEv` route above is the general gas-abstraction.  For the SPECIFIC
-   shape Law1 produces there is a cleaner, fully-grounded proof: the only honest
-   hypothesis is that each if-body eventually reverts — TRUE because the real
-   encodings are straight-line `mstore`/`abi_encode`/`revert` (they neither loop
-   nor depend on memory contents to terminate).  Because `REVERT` discards its
-   arguments, both bodies hit the SAME `.error .Revert`; the guard is identical,
-   so the branch decision agrees; and the guard-false branch runs the shared `Q`.
-   ============================================================================ -/
+  For the specific program forms considered here, the distinct-body case admits a
+  self-contained proof whose only hypothesis is that each branch body eventually
+  reverts. This hypothesis holds for the bodies actually emitted by the compiler,
+  which are straight-line sequences of memory writes followed by a `revert` and
+  hence neither loop nor depend on memory contents in order to terminate. Since
+  `REVERT` discards its arguments, both bodies reduce to the same payload-free
+  exception; the guard is common to both forms, so the branch decision agrees; and
+  the complementary branch executes the shared continuation.
+-/
 
-/-- A block body "eventually reverts": beyond fuel `N`, uniformly in the entry
-    state, it reduces to the payload-free `.error .Revert`. -/
+/-- A block body eventually reverts if, beyond some fuel threshold and uniformly
+    in the entry state, its evaluation yields the payload-free revert exception. -/
 def EventuallyReverts (body : List Stmt) : Prop :=
   ∃ N : ℕ, ∀ fuel : ℕ, N ≤ fuel → ∀ s : Yul.State,
     exec fuel (.Block body) .none s = .error (.Revert : Yul.Exception)
 
 
-/-- **R ≠ S, fully grounded.**  Distinct if-bodies `bodyR`, `bodyS`; shared guard
-    `iszero(B)` and shared postfix `Q`.  Under the honest hypotheses that each
-    if-body eventually reverts (`hR`, `hS`), the two programs are eventually
-    observationally equivalent.  NO `exec_mono`, NO `sorry`, NO `axiom`. -/
+/-- Equivalence for distinct branch bodies. Given branch bodies `bodyR` and
+    `bodyS`, a common guard `iszero(B)`, and a common continuation `Q`, the two
+    programs are eventually observationally equivalent under the hypotheses that
+    each body eventually reverts. The proof appeals neither to fuel monotonicity
+    nor to any unproven assumption. -/
 theorem require_custom_error_eventually_equiv_distinct_grounded
     (B : Expr) (bodyR bodyS Q : List Stmt)
     (hR : EventuallyReverts bodyR) (hS : EventuallyReverts bodyS) :
@@ -209,20 +224,24 @@ theorem require_custom_error_eventually_equiv_distinct_grounded
   rw [hif s]
 
 
-/- ============================================================================
-   INTEGRATION NOTE.
+/-
+  Summary of results.
 
-   • `require_custom_error_observationally_equiv`  — R = S, ∀ fuel, NO hypothesis.
-   • `require_custom_error_eventually_equiv_distinct_grounded` — R ≠ S, eventual,
-     hypotheses `hR`/`hS` (each if-body eventually reverts).  NO `exec_mono`.
-   • `require_custom_error_single_if` — the professor's final theorem: single `if`,
-     ABSTRACT R and S, under the straight-line provisos `RunsOk R` / `RunsOk S`.
+  Three theorems are established. For coincident branch bodies,
+  `require_custom_error_observationally_equiv` gives observational equivalence at
+  every fuel value, without hypotheses. For distinct bodies,
+  `require_custom_error_eventually_equiv_distinct_grounded` gives eventual
+  observational equivalence under the hypothesis that each body eventually
+  reverts. Finally, `require_custom_error_single_if` states the result for the
+  single-conditional form with abstract bodies `R` and `S`, under the
+  straight-line hypotheses `RunsOk R` and `RunsOk S`.
 
-   The provisos `RunsOk R` / `RunsOk S` capture, in one condition, that the prefix
-   encoding runs to `.ok` (does not revert, loop, or break/continue/leave).  The
-   bridge `eventuallyReverts_of_runsOk` discharges `hR`/`hS` from them by a
-   fixed-fuel induction on the statement list — no fuel-monotonicity required.
-   ============================================================================ -/
+  These hypotheses express, in a single condition, that the body evaluates
+  successfully rather than reverting, diverging, or transferring control non-
+  locally. The lemma `eventuallyReverts_of_runsOk` discharges the eventual-revert
+  hypotheses from them by induction on the statement list at a fixed fuel, with no
+  appeal to fuel monotonicity.
+-/
 
 
 
@@ -243,30 +262,28 @@ lemma exec_revert_single (n : ℕ) (codeOverride : Option YulContract) (s' : Yul
   simp [multifill']
 
 
-/- ============================================================================
-   THE PROFESSOR'S FINAL THEOREM — ABSTRACT R and S (not mstore-specific).
+/-
+  The single-conditional form with abstract bodies.
 
-   Target (single `.If`, encoding inside the branch, R and S arbitrary):
+  The target statement asserts the eventual observational equivalence of
 
-       EventuallyObsEquiv
-         (.If (iszero B) (R ++ [revert a1 b1]))
-         (.If (iszero B) (S ++ [revert a2 b2]))
+      if iszero(B) { R ++ [revert a₁ b₁] }    and    if iszero(B) { S ++ [revert a₂ b₂] }
 
-   PROVISOS (exactly the ones the professor anticipated), as explicit hypotheses
-   on R and S separately:
-     `RunsOk R` : from any state, at any sufficiently large fuel, executing the
-                  prefix block `R` returns `.ok` — i.e. R does NOT revert, does
-                  NOT loop forever, does NOT break/continue/leave.  (Straight-line.)
+  for arbitrary straight-line prefixes `R` and `S`, under the separate hypotheses
+  `RunsOk R` and `RunsOk S`. Each hypothesis states that the prefix evaluates
+  successfully from every state at sufficiently large fuel, and thus neither
+  reverts, diverges, nor transfers control non-locally. Under these hypotheses the
+  result holds without fuel monotonicity: the lemma `eventuallyReverts_of_runsOk`
+  derives the eventual-revert property of `R ++ [revert]` from `RunsOk R` by
+  induction on `R` at a fixed fuel, exploiting that the block-cons reduction
+  evaluates head and tail at the same fuel, after which the distinct-body theorem
+  concludes.
+-/
 
-   Under `RunsOk R` and `RunsOk S` the theorem holds with NO `exec_mono`: the
-   bridge `eventuallyReverts_of_runsOk` shows `RunsOk R ⟹ EventuallyReverts
-   (R ++ [revert])` by induction on R at a FIXED fuel (the interpreter's block-cons
-   runs head and tail at the same fuel, so no monotonicity is needed), and the
-   grounded distinct theorem finishes. -/
-
-/-- The terminator fact for Law1: the singleton block `[revert(a,b)]` reverts at
-    any fuel ≥ 7 (one fuel level for the block-cons, six for the revert call).
-    This is the `hTail` that `Core.exec_prefix_then_tail` consumes. -/
+/-- The terminator lemma: the singleton block `[revert(a, b)]` reverts at any fuel
+    at least seven, one level being consumed by the block reduction and six by the
+    revert call. This instantiates the hypothesis of the straight-line elimination
+    principle. -/
 lemma exec_block_revert_reverts (a b : UInt256) :
     ∀ (n : ℕ) (s : Yul.State), n ≥ 7 →
       exec n (.Block [.ExprStmtCall (.Call (Sum.inl (.REVERT : Operation .Yul)) [.Lit a, .Lit b])]) .none s
@@ -277,10 +294,10 @@ lemma exec_block_revert_reverts (a b : UInt256) :
         = _ from by rw [Yul.exec]]
   rw [exec_revert_single j .none s a b]
 
-/-- **Bridge (via Core).**  If the prefix `R` runs to `.ok` (`RunsOk R`), then
-    `R ++ [revert(a,b)]` eventually reverts.  The straight-line induction lives in
-    `Core.exec_prefix_then_tail`; Law1 supplies only the terminator fact
-    `exec_block_revert_reverts`.  NO `exec_mono`. -/
+/-- If a prefix `R` evaluates successfully, then `R ++ [revert(a, b)]` eventually
+    reverts. The straight-line induction is supplied by the elimination principle
+    of the foundational module; only the terminator lemma is specific to this
+    transformation. -/
 theorem eventuallyReverts_of_runsOk
     (R : List Stmt) (a b : UInt256) (hR : RunsOk R) :
     EventuallyReverts
@@ -290,9 +307,9 @@ theorem eventuallyReverts_of_runsOk
   exact Core.exec_prefix_then_tail (.error .Revert) _
     (exec_block_revert_reverts a b) R fuel s (hN fuel (by omega) s) (by omega)
 
-/-- **Professor's theorem (ABSTRACT R, S).**  Single `.If`, encoding inside the
-    branch, R and S arbitrary, under the straight-line provisos `RunsOk R`,
-    `RunsOk S`.  Eventually observationally equivalent.  NO `exec_mono`, NO sorry. -/
+/-- The single-conditional form with abstract straight-line bodies `R` and `S`,
+    under the hypotheses `RunsOk R` and `RunsOk S`, is eventually observationally
+    equivalent across the two encodings of the failure branch. -/
 theorem require_custom_error_single_if
     (B : Expr) (R S : List Stmt) (a₁ b₁ a₂ b₂ : UInt256)
     (hR : RunsOk R) (hS : RunsOk S) :
