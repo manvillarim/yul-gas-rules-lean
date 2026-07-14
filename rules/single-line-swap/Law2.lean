@@ -1250,4 +1250,837 @@ theorem single_line_swap_equiv_general_nil
   simpa only [tempSwapInterleaved, simulSwapInterleaved, tempSwap, simulSwap,
     List.nil_append, List.append_nil, List.append_assoc] using h
 
+/-
+  The compiler-faithful four-statement form of the simultaneous swap.
+
+  The lowered form verified above collapses the simultaneous assignment to
+  three statements, capturing only the second operand ahead of the two
+  cross-assignments. The compiler (`solc`) instead captures BOTH operands into
+  fresh temporaries before performing either write, as witnessed by the
+  reference output `single-line-swap.yul`:
+
+        let expr_34_component_1 := expr_32   -- = varB
+        let expr_34_component_2 := expr_33   -- = varA
+        var_varB_26 := expr_34_component_2   -- varB := (old varA)
+        var_varA_22 := expr_34_component_1   -- varA := (old varB)
+
+  which is modelled here, at the level of Yul statements, as
+  `simulSwapFour`. The three-statement `simulSwap` above remains available as a
+  simplified model; the four-statement form below is the one that is faithful
+  to the compiler's actual output and is the primary result of this file.
+-/
+
+def simulSwapFour (v1 v2 varA varB : Identifier) : List Stmt :=
+  [ .Let [v1]   (some (.Var varB)),   -- v1 := varB   (capture old varB)
+    .Let [v2]   (some (.Var varA)),   -- v2 := varA   (capture old varA)
+    .Let [varB] (some (.Var v2)),     -- varB := v2   (= old varA)
+    .Let [varA] (some (.Var v1)) ]    -- varA := v1   (= old varB)
+
+/-- Interleaved right-hand side: the four-statement swap up front, then `P`,
+    `Q`, `S`. The swap is, as in the three-statement lowered form, performed as
+    a single uninterrupted sequence ahead of `P`. -/
+def simulSwapFourInterleaved (R P Q S : List Stmt) (v1 v2 varA varB : Identifier) : List Stmt :=
+  R ++ simulSwapFour v1 v2 varA varB ++ P ++ Q ++ S
+
+/-- Evaluation of four reassignments followed by a continuation: the four steps
+    are performed and evaluation proceeds with the continuation from the
+    resulting state. The four-statement analogue of `exec_reassign3_append_Q`. -/
+lemma exec_reassign4_append_Q
+    (n : ℕ) (co : Option YulContract) (s : Yul.State) (Q : List Stmt)
+    (va vb vc vd wa wb wc wd : Identifier) :
+    exec (n + 5) (.Block ([.Let [va] (some (.Var wa)),
+                           .Let [vb] (some (.Var wb)),
+                           .Let [vc] (some (.Var wc)),
+                           .Let [vd] (some (.Var wd))] ++ Q)) co s
+      = exec (n + 1) (.Block Q) co
+          ((((s⟦va ↦ s[wa]!⟧)⟦vb ↦ (s⟦va ↦ s[wa]!⟧)[wb]!⟧)
+             ⟦vc ↦ ((s⟦va ↦ s[wa]!⟧)⟦vb ↦ (s⟦va ↦ s[wa]!⟧)[wb]!⟧)[wc]!⟧)
+             ⟦vd ↦ (((s⟦va ↦ s[wa]!⟧)⟦vb ↦ (s⟦va ↦ s[wa]!⟧)[wb]!⟧)
+                      ⟦vc ↦ ((s⟦va ↦ s[wa]!⟧)⟦vb ↦ (s⟦va ↦ s[wa]!⟧)[wb]!⟧)[wc]!⟧)[wd]!⟧) := by
+  simp only [List.cons_append, List.nil_append]
+  rw [show n + 5 = (n+3) + 2 from by omega, exec_block_reassign_cons]
+  rw [show n + 3 + 1 = (n+2) + 2 from by omega, exec_block_reassign_cons]
+  rw [show n + 2 + 1 = (n+1) + 2 from by omega, exec_block_reassign_cons]
+  rw [show n + 1 + 1 = n + 2 from by omega, exec_block_reassign_cons]
+
+/-- Effect of the four-statement compiler-faithful sequence. From a state in
+    which the five names (`v1`, `v2`, `varA`, `varB`, and implicitly whatever
+    else) are pairwise distinct as required, and `varA`, `varB` are bound, the
+    four reassignments yield the state that binds `varA` and `varB` to their
+    exchanged values (with `v1`, `v2` retaining the captured originals). The
+    proof reduces the four steps and evaluates the resulting reads, mirroring
+    `simulSwap_effect` with one extra capture step. -/
+lemma simulSwapFour_effect
+    (n : ℕ) (co : Option YulContract) (ss : SharedState .Yul) (store : VarStore)
+    (v1 v2 varA varB : Identifier)
+    (_hAB : varA ≠ varB)
+    (h1A : v1 ≠ varA) (h1B : v1 ≠ varB) (_h2A : v2 ≠ varA) (_h2B : v2 ≠ varB)
+    (h12 : v1 ≠ v2)
+    (hmA : varA ∈ store) (_hmB : varB ∈ store) :
+    exec (n + 5) (.Block (simulSwapFour v1 v2 varA varB)) co (State.Ok ss store)
+      = .ok (((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+                ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+                ⟦varB ↦ (State.Ok ss store)[varA]!⟧)
+                ⟦varA ↦ (State.Ok ss store)[varB]!⟧) := by
+  unfold simulSwapFour
+  rw [show n + 5 = (n+3) + 2 from by omega, exec_block_reassign_cons]
+  rw [show n + 3 + 1 = (n+2) + 2 from by omega, exec_block_reassign_cons]
+  -- read varA in state ⟦v1↦B₀⟧: v1 ≠ varA, varA ∈ store  ⟹  A₀
+  rw [show ((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)[varA]!
+        = (State.Ok ss store)[varA]! from
+        get_insert_ne ss store v1 varA _ (Ne.symm h1A) hmA]
+  rw [show n + 2 + 1 = (n+1) + 2 from by omega, exec_block_reassign_cons]
+  -- read v2 in state ⟦v1↦B₀⟧⟦v2↦A₀⟧: top insert  ⟹  A₀
+  rw [show (((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+            ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)[v2]!
+        = (State.Ok ss store)[varA]! from
+        get_insert_same ss _ v2 _]
+  rw [show n + 1 + 1 = n + 2 from by omega, exec_block_reassign_single]
+  congr 1
+  -- read v1 in state ⟦v1↦B₀⟧⟦v2↦A₀⟧⟦varB↦A₀⟧: peel varB (v1≠varB), then v2 (v1≠v2), hit v1  ⟹  B₀
+  have hread :
+      ((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+          ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+          ⟦varB ↦ (State.Ok ss store)[varA]!⟧)[v1]!
+        = (State.Ok ss store)[varB]! := by
+    rw [show ((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+              ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+              ⟦varB ↦ (State.Ok ss store)[varA]!⟧)[v1]!
+           = (((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+              ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)[v1]! from
+         get_insert_ne ss _ varB v1 _ h1B
+           (Finmap.mem_insert.mpr (Or.inr (Finmap.mem_insert.mpr (Or.inl rfl))))]
+    rw [show (((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+              ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)[v1]!
+           = ((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)[v1]! from
+         get_insert_ne ss _ v2 v1 _ h12 (Finmap.mem_insert.mpr (Or.inl rfl))]
+    exact get_insert_same ss store v1 _
+  rw [hread]
+
+/-- In the state reached by the four-statement compiler-faithful sequence,
+    `varA` and `varB` hold the exchanged values, in agreement with both the
+    temporary-based and three-statement lowered sequences. -/
+lemma simulSwapFour_reads
+    (ss : SharedState .Yul) (store : VarStore) (v1 v2 varA varB : Identifier)
+    (hAB : varA ≠ varB) (_h1A : v1 ≠ varA) (_h1B : v1 ≠ varB)
+    (_h2A : v2 ≠ varA) (_h2B : v2 ≠ varB) (_h12 : v1 ≠ v2) :
+    (((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+        ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+        ⟦varB ↦ (State.Ok ss store)[varA]!⟧)
+        ⟦varA ↦ (State.Ok ss store)[varB]!⟧)[varA]!
+      = (State.Ok ss store)[varB]!
+    ∧ (((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+        ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+        ⟦varB ↦ (State.Ok ss store)[varA]!⟧)
+        ⟦varA ↦ (State.Ok ss store)[varB]!⟧)[varB]!
+      = (State.Ok ss store)[varA]! := by
+  constructor
+  · -- read varA: hits the outermost varA-insert directly
+    exact get_insert_same ss _ varA _
+  · -- read varB: passes varA-insert (varB ≠ varA), hits varB-insert
+    rw [show (((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+              ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+              ⟦varB ↦ (State.Ok ss store)[varA]!⟧)
+              ⟦varA ↦ (State.Ok ss store)[varB]!⟧)[varB]!
+           = ((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+              ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+              ⟦varB ↦ (State.Ok ss store)[varA]!⟧)[varB]! from
+         get_insert_ne ss _ varA varB _ (Ne.symm hAB)
+           (Finmap.mem_insert.mpr (Or.inl rfl))]
+    exact get_insert_same ss _ varB _
+
+/-- Evaluation of the four-statement compiler-faithful sequence followed by the
+    continuation, presented with the resulting state in reduced form. The
+    four-statement analogue of `simulSwap_append`. -/
+lemma simulSwapFour_append
+    (n : ℕ) (co : Option YulContract) (ss : SharedState .Yul) (store : VarStore)
+    (v1 v2 varA varB : Identifier) (Q : List Stmt)
+    (_hAB : varA ≠ varB)
+    (h1A : v1 ≠ varA) (h1B : v1 ≠ varB) (_h2A : v2 ≠ varA) (_h2B : v2 ≠ varB)
+    (h12 : v1 ≠ v2)
+    (hmA : varA ∈ store) (_hmB : varB ∈ store) :
+    exec (n + 5) (.Block (simulSwapFour v1 v2 varA varB ++ Q)) co (State.Ok ss store)
+      = exec (n + 1) (.Block Q) co
+          (((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+              ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+              ⟦varB ↦ (State.Ok ss store)[varA]!⟧)
+              ⟦varA ↦ (State.Ok ss store)[varB]!⟧) := by
+  unfold simulSwapFour
+  rw [exec_reassign4_append_Q]
+  -- read2: varA in ⟦v1↦B₀⟧  ⟹  A₀
+  rw [show ((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)[varA]!
+        = (State.Ok ss store)[varA]! from
+        get_insert_ne ss store v1 varA _ (Ne.symm h1A) hmA]
+  -- read3: v2 in ⟦v1↦B₀⟧⟦v2↦A₀⟧  ⟹  A₀ (top read)
+  rw [show (((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+            ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)[v2]!
+        = (State.Ok ss store)[varA]! from
+        get_insert_same ss _ v2 _]
+  -- read4: v1 in ⟦v1↦B₀⟧⟦v2↦A₀⟧⟦varB↦A₀⟧  ⟹  B₀ (double peel)
+  rw [show ((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+            ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+            ⟦varB ↦ (State.Ok ss store)[varA]!⟧)[v1]!
+        = (State.Ok ss store)[varB]! from by
+      rw [show ((((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+                ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+                ⟦varB ↦ (State.Ok ss store)[varA]!⟧)[v1]!
+             = (((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+                ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)[v1]! from
+           get_insert_ne ss _ varB v1 _ h1B
+             (Finmap.mem_insert.mpr (Or.inr (Finmap.mem_insert.mpr (Or.inl rfl))))]
+      rw [show (((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+                ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)[v1]!
+             = ((State.Ok ss store)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)[v1]! from
+           get_insert_ne ss _ v2 v1 _ h12 (Finmap.mem_insert.mpr (Or.inl rfl))]
+      exact get_insert_same ss store v1 _]
+
+/-- The four-variable analogue of `commutes_shift3`: four pending writes, to
+    variables the block commutes with, may be pulled through together. -/
+lemma commutes_shift4 (X : List Stmt) (v1 v2 v3 v4 : Identifier)
+    (h1 : CommutesWith X v1) (h2 : CommutesWith X v2)
+    (h3 : CommutesWith X v3) (h4 : CommutesWith X v4)
+    (fuel : ℕ) (co : Option YulContract) (ss : SharedState .Yul) (store : VarStore)
+    (val1 val2 val3 val4 : EvmYul.Literal) :
+    exec fuel (.Block X) co
+        ((((State.Ok ss store)⟦v1↦val1⟧)⟦v2↦val2⟧)⟦v3↦val3⟧⟦v4↦val4⟧)
+      = (match exec fuel (.Block X) co (State.Ok ss store) with
+         | .ok s' => .ok ((((s'⟦v1↦val1⟧)⟦v2↦val2⟧)⟦v3↦val3⟧)⟦v4↦val4⟧)
+         | .error e => .error e) := by
+  rw [show (((State.Ok ss store)⟦v1↦val1⟧)⟦v2↦val2⟧)⟦v3↦val3⟧⟦v4↦val4⟧
+        = (State.Ok ss (((store.insert v1 val1).insert v2 val2).insert v3 val3))⟦v4↦val4⟧
+        from rfl]
+  rw [h4 fuel co ss (((store.insert v1 val1).insert v2 val2).insert v3 val3) val4]
+  rw [show (State.Ok ss (((store.insert v1 val1).insert v2 val2).insert v3 val3))
+        = (State.Ok ss ((store.insert v1 val1).insert v2 val2))⟦v3↦val3⟧ from rfl]
+  rw [h3 fuel co ss ((store.insert v1 val1).insert v2 val2) val3]
+  rw [show (State.Ok ss ((store.insert v1 val1).insert v2 val2))
+        = (State.Ok ss (store.insert v1 val1))⟦v2↦val2⟧ from rfl]
+  rw [h2 fuel co ss (store.insert v1 val1) val2]
+  rw [show (State.Ok ss (store.insert v1 val1)) = (State.Ok ss store)⟦v1↦val1⟧ from rfl]
+  rw [h1 fuel co ss store val1]
+  cases exec fuel (.Block X) co (State.Ok ss store) with
+  | error e => rfl
+  | ok s' => rfl
+
+/-- The four-variable analogue of `push_through3`: four pending writes, to
+    variables `X` commutes with, hop over `X` together, landing just ahead of
+    the continuation `rest`. -/
+lemma push_through4 (X rest : List Stmt) (v1 v2 v3 v4 : Identifier)
+    (h1 : CommutesWith X v1) (h2 : CommutesWith X v2)
+    (h3 : CommutesWith X v3) (h4 : CommutesWith X v4)
+    (fuel : ℕ) (co : Option YulContract) (ss : SharedState .Yul) (store : VarStore)
+    (val1 val2 val3 val4 : EvmYul.Literal) :
+    exec (fuel + X.length) (.Block (X ++ rest)) co
+        ((((State.Ok ss store)⟦v1↦val1⟧)⟦v2↦val2⟧)⟦v3↦val3⟧⟦v4↦val4⟧)
+      = (match exec (fuel + X.length) (.Block X) co (State.Ok ss store) with
+         | .ok s' => exec fuel (.Block rest) co ((((s'⟦v1↦val1⟧)⟦v2↦val2⟧)⟦v3↦val3⟧)⟦v4↦val4⟧)
+         | .error e => .error e) := by
+  rw [exec_block_append X rest fuel co
+        ((((State.Ok ss store)⟦v1↦val1⟧)⟦v2↦val2⟧)⟦v3↦val3⟧⟦v4↦val4⟧)]
+  rw [commutes_shift4 X v1 v2 v3 v4 h1 h2 h3 h4 (fuel + X.length) co ss store
+        val1 val2 val3 val4]
+  cases exec (fuel + X.length) (.Block X) co (State.Ok ss store) with
+  | error e => rfl
+  | ok s' => rfl
+
+/-
+  The non-interference proviso for the compiler-faithful four-statement
+  transformation.
+
+  The right-hand side now binds TWO compiler temporaries `v1`, `v2` — never
+  bound on the left-hand side — so `P`, `Q` must not read or write either of
+  them (in addition to `tmp`, `varA`, `varB`, exactly as `Isolated` already
+  required of `c` in the three-statement lowered form). `Isolated4` is the
+  semantic rendering of the syntactic side condition "`tmp`, `varA`, `varB`,
+  and the compiler temporaries `v1`, `v2` do not occur in `P`, `Q`"; as with
+  `Isolated`, this syntactic-to-semantic bridge is part of the trusted
+  computing base, assumed rather than proved, on the same footing as the
+  Yul/`solc` fidelity of `simulSwapFour` itself and the professor's clean-up
+  Theorems 1 and 2 that reduce the raw compiler output to this canonical
+  four-`let` form. Omitting `v1` or `v2` from the commutation set yields a
+  FALSE theorem: a `P` that reads `v1` would observe the captured value of
+  `varB` where the temporary-based left-hand side has no such binding at all. -/
+structure Isolated4 (X : List Stmt) (tmp v1 v2 varA varB : Identifier) where
+  commTmp : CommutesWith X tmp
+  commV1  : CommutesWith X v1
+  commV2  : CommutesWith X v2
+  commA   : CommutesWith X varA
+  commB   : CommutesWith X varB
+  threshold : ℕ
+  stable  : ∀ (fuel : ℕ), threshold ≤ fuel →
+              ∀ (co : Option YulContract) (s : Yul.State),
+              exec fuel (.Block X) co s = exec threshold (.Block X) co s
+  okOut   : ∀ (co : Option YulContract) (ss : SharedState .Yul) (store : VarStore)
+              (s' : Yul.State),
+              exec threshold (.Block X) co (State.Ok ss store) = .ok s' →
+              ∃ ss' store', s' = State.Ok ss' store'
+  passthrough : ∀ (co : Option YulContract),
+              exec threshold (.Block X) co State.OutOfFuel = .ok State.OutOfFuel
+                ∧ ∀ j, exec threshold (.Block X) co (State.Checkpoint j)
+                    = .ok (State.Checkpoint j)
+
+/-- Beyond the threshold, an `Isolated4` block's result, whenever it succeeds,
+    is an `.Ok` state — the same one regardless of which sufficient fuel was
+    supplied. -/
+lemma Isolated4.okOut_of_le {X : List Stmt} {tmp v1 v2 varA varB : Identifier}
+    (h : Isolated4 X tmp v1 v2 varA varB) (fuel : ℕ) (hfuel : h.threshold ≤ fuel)
+    (co : Option YulContract) (ss : SharedState .Yul) (store : VarStore) (s' : Yul.State)
+    (hex : exec fuel (.Block X) co (State.Ok ss store) = .ok s') :
+    ∃ ss' store', s' = State.Ok ss' store' := by
+  rw [h.stable fuel hfuel co (State.Ok ss store)] at hex
+  exact h.okOut co ss store s' hex
+
+/-- Beyond the threshold, an `Isolated4` block's result no longer depends on
+    which sufficient fuel was supplied. -/
+lemma Isolated4.agree_of_le {X : List Stmt} {tmp v1 v2 varA varB : Identifier}
+    (h : Isolated4 X tmp v1 v2 varA varB) (fuel1 fuel2 : ℕ)
+    (hfuel1 : h.threshold ≤ fuel1) (hfuel2 : h.threshold ≤ fuel2)
+    (co : Option YulContract) (s : Yul.State) :
+    exec fuel1 (.Block X) co s = exec fuel2 (.Block X) co s := by
+  rw [h.stable fuel1 hfuel1 co s, h.stable fuel2 hfuel2 co s]
+
+/-- An `Isolated4` block, at any sufficient fuel, leaves an
+    `OutOfFuel`/`Checkpoint` starting marker untouched. -/
+lemma Isolated4.passthrough_of_le {X : List Stmt} {tmp v1 v2 varA varB : Identifier}
+    (h : Isolated4 X tmp v1 v2 varA varB) (fuel : ℕ) (hfuel : h.threshold ≤ fuel)
+    (co : Option YulContract) :
+    exec fuel (.Block X) co State.OutOfFuel = .ok State.OutOfFuel
+      ∧ ∀ j, exec fuel (.Block X) co (State.Checkpoint j) = .ok (State.Checkpoint j) := by
+  rw [h.stable fuel hfuel co State.OutOfFuel]
+  constructor
+  · exact (h.passthrough co).1
+  · intro j
+    rw [h.stable fuel hfuel co (State.Checkpoint j)]
+    exact (h.passthrough co).2 j
+
+/-
+  The trailing continuation's proviso, strengthened for the four-statement
+  theorem.
+
+  `AgreesOnAB` (used above) requires `S` to evaluate identically from any two
+  states agreeing on `varA`, `varB`, AT THE SAME FUEL. That suffices exactly
+  when the two swap forms being compared consume the same number of
+  statements, so that a shared total fuel budget hands `S` the same remaining
+  fuel on both sides — the case for the three-statement `tempSwap`/`simulSwap`
+  pair. It is NOT the case here: the four-statement `simulSwapFour` consumes
+  one more unit of fuel than the three-statement `tempSwap` before reaching
+  `S`, so under a shared total fuel budget across the whole program, the two
+  derivations hand `S` fuel differing by exactly one. Bridging that one-unit
+  gap would ordinarily be immediate from fuel-monotonicity of `exec`, but this
+  development deliberately does not assume that (`Core.lean` explicitly notes
+  its reasoning principles are developed fuel-monotonicity-free). Instead,
+  exactly as `Isolated.stable` does for the interleaved blocks `P`, `Q`,
+  `AgreesOnABEventually` packages the needed stabilisation explicitly: `S`'s
+  result, from ANY starting state, no longer depends on the exact fuel once a
+  threshold is cleared, and at that threshold it agrees across any two states
+  that agree on `varA`, `varB`. This is a strengthening of `AgreesOnAB`, used
+  only for the four-statement theorem below; the three-statement theorems
+  above, and their `AgreesOnAB` proviso, are untouched. -/
+structure AgreesOnABEventually (S : List Stmt) (varA varB : Identifier) where
+  threshold : ℕ
+  stable : ∀ (fuel : ℕ), threshold ≤ fuel → ∀ (co : Option YulContract) (s : Yul.State),
+      exec fuel (.Block S) co s = exec threshold (.Block S) co s
+  agree : ∀ (s₁ s₂ : Yul.State) (co : Option YulContract),
+      s₁[varA]! = s₂[varA]! → s₁[varB]! = s₂[varB]! →
+      exec threshold (.Block S) co s₁ = exec threshold (.Block S) co s₂
+
+/-- Reduction of the interleaved temporary-based swap fragment for the
+    four-statement theorem (shared prefix `R` already stripped). The
+    left-hand side is unchanged from the three-statement development — it is
+    still the three-reassignment `tempSwapInterleaved` — so this is
+    `lhs_fragment_reduces` verbatim, typed against `Isolated4` (five names)
+    instead of `Isolated` (four names) for `P`, `Q`. -/
+lemma lhs_fragment_four_reduces
+    (n : ℕ) (co : Option YulContract) (ss : SharedState .Yul) (store : VarStore)
+    (P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hTA : tmp ≠ varA) (hTB : tmp ≠ varB)
+    (_hmA : varA ∈ store) (hmB : varB ∈ store)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hnP : hP.threshold ≤ n) (hnQ : hQ.threshold ≤ n) :
+    exec (n + 4 + Q.length + P.length)
+        (.Block (tempSwapInterleaved [] P Q S tmp varA varB)) co (State.Ok ss store)
+      = (match exec (n + 3 + Q.length + P.length) (.Block P) co (State.Ok ss store) with
+         | .error e => .error e
+         | .ok sP =>
+           match exec (n + 2 + Q.length) (.Block Q) co sP with
+           | .error e => .error e
+           | .ok sQ =>
+             exec (n + 1) (.Block S) co
+               (((sQ⟦tmp ↦ (State.Ok ss store)[varA]!⟧)
+                   ⟦varA ↦ (State.Ok ss store)[varB]!⟧)
+                   ⟦varB ↦ (State.Ok ss store)[varA]!⟧)) := by
+  unfold tempSwapInterleaved
+  simp only [List.nil_append, List.append_assoc, List.cons_append]
+  rw [show n + 4 + Q.length + P.length = (n + 2 + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  rw [show (n + 2 + Q.length + P.length) + 1 = (n + 3 + Q.length) + P.length from by omega]
+  rw [push_through P _ tmp hP.commTmp (n + 3 + Q.length) co ss store
+        ((State.Ok ss store)[varA]!)]
+  cases hPexec : exec (n + 3 + Q.length + P.length) (.Block P) co (State.Ok ss store) with
+  | error e => rfl
+  | ok sP =>
+    obtain ⟨ssP, storeP, hsP⟩ :=
+      hP.okOut_of_le (n + 3 + Q.length + P.length) (by omega) _ _ _ _ hPexec
+    subst hsP
+    dsimp only
+    rw [show n + 3 + Q.length = (n + 1 + Q.length) + 2 from by omega]
+    rw [exec_block_reassign_cons]
+    have hreadB : ((State.Ok ssP storeP)⟦tmp ↦ (State.Ok ss store)[varA]!⟧)[varB]!
+        = (State.Ok ss store)[varB]! := by
+      rw [get_insert_ne ssP storeP tmp varB _ (Ne.symm hTB)
+            (commutes_preserves_mem hP.commB (n + 3 + Q.length + P.length) co ss store hmB
+              ssP storeP hPexec)]
+      exact commutes_preserves_read hP.commB (n + 3 + Q.length + P.length) co ss store hmB
+        ssP storeP hPexec
+    rw [hreadB]
+    rw [show (n + 1 + Q.length) + 1 = (n + 2) + Q.length from by omega]
+    rw [push_through2 Q _ tmp varA hQ.commTmp hQ.commA (n + 2) co ssP storeP
+          ((State.Ok ss store)[varA]!) ((State.Ok ss store)[varB]!)]
+    cases hQexec : exec (n + 2 + Q.length) (.Block Q) co (State.Ok ssP storeP) with
+    | error e => rfl
+    | ok sQ =>
+      obtain ⟨ssQ, storeQ, hsQ⟩ :=
+        hQ.okOut_of_le (n + 2 + Q.length) (by omega) _ _ _ _ hQexec
+      subst hsQ
+      dsimp only
+      rw [exec_block_reassign_cons]
+      have hreadTmp :
+          (((State.Ok ssQ storeQ)⟦tmp ↦ (State.Ok ss store)[varA]!⟧)
+              ⟦varA ↦ (State.Ok ss store)[varB]!⟧)[tmp]!
+            = (State.Ok ss store)[varA]! := by
+        rw [show (((State.Ok ssQ storeQ)⟦tmp ↦ (State.Ok ss store)[varA]!⟧)
+                  ⟦varA ↦ (State.Ok ss store)[varB]!⟧)[tmp]!
+               = ((State.Ok ssQ storeQ)⟦tmp ↦ (State.Ok ss store)[varA]!⟧)[tmp]! from
+             get_insert_ne ssQ (Finmap.insert tmp ((State.Ok ss store)[varA]!) storeQ)
+               varA tmp _ hTA (Finmap.mem_insert.mpr (Or.inl rfl))]
+        exact get_insert_same ssQ storeQ tmp _
+      rw [hreadTmp]
+
+/-- Reduction of the interleaved four-statement compiler-faithful fragment
+    (shared prefix `R` already stripped). The four-statement swap runs first,
+    as a unit, via `simulSwapFour_append`; the resulting four insertions then
+    hop over `P` and `Q` together via `push_through4`. -/
+lemma rhs_fragment_four_reduces
+    (n : ℕ) (co : Option YulContract) (ss : SharedState .Yul) (store : VarStore)
+    (P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hAB : varA ≠ varB)
+    (h1A : v1 ≠ varA) (h1B : v1 ≠ varB) (h2A : v2 ≠ varA) (h2B : v2 ≠ varB) (h12 : v1 ≠ v2)
+    (hmA : varA ∈ store) (hmB : varB ∈ store)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hnP : hP.threshold ≤ n) :
+    exec (n + 5 + Q.length + P.length)
+        (.Block (simulSwapFourInterleaved [] P Q S v1 v2 varA varB)) co (State.Ok ss store)
+      = (match exec (n + 1 + Q.length + P.length) (.Block P) co (State.Ok ss store) with
+         | .error e => .error e
+         | .ok sP =>
+           match exec (n + 1 + Q.length) (.Block Q) co sP with
+           | .error e => .error e
+           | .ok sQ =>
+             exec (n + 1) (.Block S) co
+               ((((sQ⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+                   ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+                   ⟦varB ↦ (State.Ok ss store)[varA]!⟧)
+                   ⟦varA ↦ (State.Ok ss store)[varB]!⟧)) := by
+  unfold simulSwapFourInterleaved
+  simp only [List.nil_append, List.append_assoc]
+  rw [show n + 5 + Q.length + P.length = (n + Q.length + P.length) + 5 from by omega]
+  rw [simulSwapFour_append (n + Q.length + P.length) co ss store v1 v2 varA varB
+        (P ++ (Q ++ S)) hAB h1A h1B h2A h2B h12 hmA hmB]
+  rw [show (n + Q.length + P.length) + 1 = (n + 1 + Q.length) + P.length from by omega]
+  rw [push_through4 P _ v1 v2 varB varA hP.commV1 hP.commV2 hP.commB hP.commA
+        (n + 1 + Q.length) co ss store
+        ((State.Ok ss store)[varB]!) ((State.Ok ss store)[varA]!)
+        ((State.Ok ss store)[varA]!) ((State.Ok ss store)[varB]!)]
+  cases hPexec : exec (n + 1 + Q.length + P.length) (.Block P) co (State.Ok ss store) with
+  | error e => rfl
+  | ok sP =>
+    obtain ⟨ssP, storeP, hsP⟩ :=
+      hP.okOut_of_le (n + 1 + Q.length + P.length) (by omega) _ _ _ _ hPexec
+    subst hsP
+    dsimp only
+    rw [push_through4 Q S v1 v2 varB varA hQ.commV1 hQ.commV2 hQ.commB hQ.commA
+          (n + 1) co ssP storeP
+          ((State.Ok ss store)[varB]!) ((State.Ok ss store)[varA]!)
+          ((State.Ok ss store)[varA]!) ((State.Ok ss store)[varB]!)]
+    cases exec (n + 1 + Q.length) (.Block Q) co (State.Ok ssP storeP) with
+    | error e => rfl
+    | ok sQ => rfl
+
+/-- The interleaved four-statement fragments (shared prefix `R` already
+    stripped) agree at every fuel large enough to clear `P`'s and `Q`'s
+    thresholds, and `S`'s. The left-hand side is invoked with internal
+    parameter `n+1` and the right-hand side with `n`, so that both share the
+    same total fuel `n + 5 + Q.length + P.length`; `P` and `Q` are then
+    aligned via `Isolated4.agree_of_le`, exactly as in `fragment_eventually_eq`.
+    The remaining one-unit fuel difference at `S` — which does not arise in
+    the three-statement development, where both swap forms consume the same
+    fuel — is what `AgreesOnABEventually` is for. -/
+lemma fragment_four_eventually_eq
+    (n : ℕ) (co : Option YulContract) (ss : SharedState .Yul) (store : VarStore)
+    (P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hAB : varA ≠ varB) (hTA : tmp ≠ varA) (hTB : tmp ≠ varB)
+    (h1A : v1 ≠ varA) (h1B : v1 ≠ varB) (h2A : v2 ≠ varA) (h2B : v2 ≠ varB) (h12 : v1 ≠ v2)
+    (hmA : varA ∈ store) (hmB : varB ∈ store)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hS : AgreesOnABEventually S varA varB)
+    (hnP : hP.threshold ≤ n) (hnQ : hQ.threshold ≤ n) (hnS : hS.threshold ≤ n) :
+    exec (n + 5 + Q.length + P.length)
+        (.Block (tempSwapInterleaved [] P Q S tmp varA varB)) co (State.Ok ss store)
+      = exec (n + 5 + Q.length + P.length)
+        (.Block (simulSwapFourInterleaved [] P Q S v1 v2 varA varB)) co (State.Ok ss store) := by
+  rw [show n + 5 + Q.length + P.length = (n + 1) + 4 + Q.length + P.length from by omega]
+  rw [lhs_fragment_four_reduces (n+1) co ss store P Q S tmp v1 v2 varA varB hTA hTB hmA hmB
+        hP hQ (by omega) (by omega)]
+  rw [show (n + 1) + 4 + Q.length + P.length = n + 5 + Q.length + P.length from by omega]
+  rw [rhs_fragment_four_reduces n co ss store P Q S tmp v1 v2 varA varB
+        hAB h1A h1B h2A h2B h12 hmA hmB hP hQ hnP]
+  rw [hP.agree_of_le ((n + 1) + 3 + Q.length + P.length) (n + 1 + Q.length + P.length)
+        (by omega) (by omega) co (State.Ok ss store)]
+  cases hPexec : exec (n + 1 + Q.length + P.length) (.Block P) co (State.Ok ss store) with
+  | error e => rfl
+  | ok sP =>
+    dsimp only
+    obtain ⟨ssP, storeP, hsP⟩ := hP.okOut_of_le (n + 1 + Q.length + P.length) (by omega)
+      co ss store sP hPexec
+    subst hsP
+    rw [hQ.agree_of_le ((n + 1) + 2 + Q.length) (n + 1 + Q.length) (by omega) (by omega) co
+          (State.Ok ssP storeP)]
+    cases hQexec : exec (n + 1 + Q.length) (.Block Q) co (State.Ok ssP storeP) with
+    | error e => rfl
+    | ok sQ =>
+      dsimp only
+      obtain ⟨ssQ, storeQ, hsQ⟩ := hQ.okOut_of_le (n + 1 + Q.length) (by omega)
+        co ssP storeP sQ hQexec
+      subst hsQ
+      rw [hS.stable ((n + 1) + 1) (by omega) co _, hS.stable (n + 1) (by omega) co _]
+      apply hS.agree _ _ co
+      · -- LHS/RHS states agree on `varA`
+        have hZL :
+            (((State.Ok ssQ storeQ)⟦tmp ↦ (State.Ok ss store)[varA]!⟧)
+                ⟦varA ↦ (State.Ok ss store)[varB]!⟧
+                ⟦varB ↦ (State.Ok ss store)[varA]!⟧)[varA]!
+              = (State.Ok ss store)[varB]! := by
+          rw [show (((State.Ok ssQ storeQ)⟦tmp ↦ (State.Ok ss store)[varA]!⟧)
+                    ⟦varA ↦ (State.Ok ss store)[varB]!⟧
+                    ⟦varB ↦ (State.Ok ss store)[varA]!⟧)[varA]!
+                 = (((State.Ok ssQ storeQ)⟦tmp ↦ (State.Ok ss store)[varA]!⟧)
+                      ⟦varA ↦ (State.Ok ss store)[varB]!⟧)[varA]! from
+               get_insert_ne ssQ _ varB varA _ hAB
+                 (Finmap.mem_insert.mpr (Or.inl rfl))]
+          exact get_insert_same ssQ _ varA _
+        have hZR :
+            ((((State.Ok ssQ storeQ)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+                ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+                ⟦varB ↦ (State.Ok ss store)[varA]!⟧
+                ⟦varA ↦ (State.Ok ss store)[varB]!⟧)[varA]!
+              = (State.Ok ss store)[varB]! :=
+          get_insert_same ssQ _ varA _
+        rw [hZL, hZR]
+      · -- LHS/RHS states agree on `varB`
+        have hZL :
+            (((State.Ok ssQ storeQ)⟦tmp ↦ (State.Ok ss store)[varA]!⟧)
+                ⟦varA ↦ (State.Ok ss store)[varB]!⟧
+                ⟦varB ↦ (State.Ok ss store)[varA]!⟧)[varB]!
+              = (State.Ok ss store)[varA]! :=
+          get_insert_same ssQ _ varB _
+        have hZR :
+            ((((State.Ok ssQ storeQ)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+                ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+                ⟦varB ↦ (State.Ok ss store)[varA]!⟧
+                ⟦varA ↦ (State.Ok ss store)[varB]!⟧)[varB]!
+              = (State.Ok ss store)[varA]! := by
+          rw [show ((((State.Ok ssQ storeQ)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+                    ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+                    ⟦varB ↦ (State.Ok ss store)[varA]!⟧
+                    ⟦varA ↦ (State.Ok ss store)[varB]!⟧)[varB]!
+                 = ((((State.Ok ssQ storeQ)⟦v1 ↦ (State.Ok ss store)[varB]!⟧)
+                      ⟦v2 ↦ (State.Ok ss store)[varA]!⟧)
+                      ⟦varB ↦ (State.Ok ss store)[varA]!⟧)[varB]! from
+               get_insert_ne ssQ _ varA varB _ (Ne.symm hAB)
+                 (Finmap.mem_insert.mpr (Or.inl rfl))]
+          exact get_insert_same ssQ _ varB _
+        rw [hZL, hZR]
+
+/-
+  Passthrough of a fuel-exhaustion or checkpoint marker through the
+  four-statement interleaved fragments, mirroring the three-statement
+  development above.
+-/
+
+/-- Reduction of the interleaved temporary-based fragment from an `OutOfFuel`
+    starting state, typed against `Isolated4`. Identical in substance to
+    `lhs_fragment_outOfFuel`, since the left-hand side is unchanged. -/
+lemma lhs_fragment_four_outOfFuel
+    (n : ℕ) (co : Option YulContract)
+    (P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hnP : hP.threshold ≤ n) (hnQ : hQ.threshold ≤ n) :
+    exec (n + 4 + Q.length + P.length)
+        (.Block (tempSwapInterleaved [] P Q S tmp varA varB)) co State.OutOfFuel
+      = exec (n + 1) (.Block S) co State.OutOfFuel := by
+  unfold tempSwapInterleaved
+  simp only [List.nil_append, List.append_assoc, List.cons_append]
+  rw [show n + 4 + Q.length + P.length = (n + 2 + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_outOfFuel]
+  rw [show (n + 2 + Q.length + P.length) + 1 = (n + 3 + Q.length) + P.length from by omega]
+  rw [exec_block_append P _ (n + 3 + Q.length) co State.OutOfFuel]
+  rw [(hP.passthrough_of_le (n + 3 + Q.length + P.length) (by omega) co).1]
+  dsimp only
+  rw [show n + 3 + Q.length = (n + 1 + Q.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_outOfFuel]
+  rw [show (n + 1 + Q.length) + 1 = (n + 2) + Q.length from by omega]
+  rw [exec_block_append Q _ (n + 2) co State.OutOfFuel]
+  rw [(hQ.passthrough_of_le (n + 2 + Q.length) (by omega) co).1]
+  dsimp only
+  rw [exec_block_reassign_cons]
+  simp only [insert_outOfFuel]
+
+/-- Reduction of the interleaved four-statement compiler-faithful fragment
+    from an `OutOfFuel` starting state. -/
+lemma rhs_fragment_four_outOfFuel
+    (n : ℕ) (co : Option YulContract)
+    (P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hnP : hP.threshold ≤ n) (hnQ : hQ.threshold ≤ n) :
+    exec (n + 5 + Q.length + P.length)
+        (.Block (simulSwapFourInterleaved [] P Q S v1 v2 varA varB)) co State.OutOfFuel
+      = exec (n + 1) (.Block S) co State.OutOfFuel := by
+  unfold simulSwapFourInterleaved
+  unfold simulSwapFour
+  simp only [List.nil_append, List.append_assoc, List.cons_append]
+  rw [show n + 5 + Q.length + P.length = (n + 3 + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_outOfFuel]
+  rw [show (n + 3 + Q.length + P.length) + 1 = (n + 2 + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_outOfFuel]
+  rw [show (n + 2 + Q.length + P.length) + 1 = (n + 1 + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_outOfFuel]
+  rw [show (n + 1 + Q.length + P.length) + 1 = (n + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_outOfFuel]
+  rw [show (n + Q.length + P.length) + 1 = (n + 1 + Q.length) + P.length from by omega]
+  rw [exec_block_append P _ (n + 1 + Q.length) co State.OutOfFuel]
+  rw [(hP.passthrough_of_le (n + 1 + Q.length + P.length) (by omega) co).1]
+  dsimp only
+  rw [exec_block_append Q S (n + 1) co State.OutOfFuel]
+  rw [(hQ.passthrough_of_le (n + 1 + Q.length) (by omega) co).1]
+
+/-- The interleaved four-statement fragments agree from an `OutOfFuel`
+    starting state. Both collapse to `S` run on the same untouched marker, at
+    fuels differing by one (`n+2` on the left, `n+1` on the right, after
+    aligning totals as in `fragment_four_eventually_eq`); `AgreesOnABEventually`
+    bridges that gap, its `agree` field applying trivially since the marker is
+    syntactically identical on both sides. -/
+lemma fragment_four_outOfFuel_eq
+    (n : ℕ) (co : Option YulContract)
+    (P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hS : AgreesOnABEventually S varA varB)
+    (hnP : hP.threshold ≤ n) (hnQ : hQ.threshold ≤ n) (hnS : hS.threshold ≤ n) :
+    exec (n + 5 + Q.length + P.length)
+        (.Block (tempSwapInterleaved [] P Q S tmp varA varB)) co State.OutOfFuel
+      = exec (n + 5 + Q.length + P.length)
+        (.Block (simulSwapFourInterleaved [] P Q S v1 v2 varA varB)) co State.OutOfFuel := by
+  rw [show n + 5 + Q.length + P.length = (n + 1) + 4 + Q.length + P.length from by omega]
+  rw [lhs_fragment_four_outOfFuel (n+1) co P Q S tmp v1 v2 varA varB hP hQ (by omega) (by omega)]
+  rw [show (n + 1) + 4 + Q.length + P.length = n + 5 + Q.length + P.length from by omega]
+  rw [rhs_fragment_four_outOfFuel n co P Q S tmp v1 v2 varA varB hP hQ hnP hnQ]
+  rw [hS.stable ((n + 1) + 1) (by omega) co State.OutOfFuel,
+      hS.stable (n + 1) (by omega) co State.OutOfFuel]
+
+/-- Reduction of the interleaved temporary-based fragment from a `Checkpoint`
+    starting state, typed against `Isolated4`. -/
+lemma lhs_fragment_four_checkpoint
+    (n : ℕ) (co : Option YulContract) (j : Jump)
+    (P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hnP : hP.threshold ≤ n) (hnQ : hQ.threshold ≤ n) :
+    exec (n + 4 + Q.length + P.length)
+        (.Block (tempSwapInterleaved [] P Q S tmp varA varB)) co (State.Checkpoint j)
+      = exec (n + 1) (.Block S) co (State.Checkpoint j) := by
+  unfold tempSwapInterleaved
+  simp only [List.nil_append, List.append_assoc, List.cons_append]
+  rw [show n + 4 + Q.length + P.length = (n + 2 + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_checkpoint]
+  rw [show (n + 2 + Q.length + P.length) + 1 = (n + 3 + Q.length) + P.length from by omega]
+  rw [exec_block_append P _ (n + 3 + Q.length) co (State.Checkpoint j)]
+  rw [(hP.passthrough_of_le (n + 3 + Q.length + P.length) (by omega) co).2 j]
+  dsimp only
+  rw [show n + 3 + Q.length = (n + 1 + Q.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_checkpoint]
+  rw [show (n + 1 + Q.length) + 1 = (n + 2) + Q.length from by omega]
+  rw [exec_block_append Q _ (n + 2) co (State.Checkpoint j)]
+  rw [(hQ.passthrough_of_le (n + 2 + Q.length) (by omega) co).2 j]
+  dsimp only
+  rw [exec_block_reassign_cons]
+  simp only [insert_checkpoint]
+
+/-- Reduction of the interleaved four-statement compiler-faithful fragment
+    from a `Checkpoint` starting state. -/
+lemma rhs_fragment_four_checkpoint
+    (n : ℕ) (co : Option YulContract) (j : Jump)
+    (P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hnP : hP.threshold ≤ n) (hnQ : hQ.threshold ≤ n) :
+    exec (n + 5 + Q.length + P.length)
+        (.Block (simulSwapFourInterleaved [] P Q S v1 v2 varA varB)) co (State.Checkpoint j)
+      = exec (n + 1) (.Block S) co (State.Checkpoint j) := by
+  unfold simulSwapFourInterleaved
+  unfold simulSwapFour
+  simp only [List.nil_append, List.append_assoc, List.cons_append]
+  rw [show n + 5 + Q.length + P.length = (n + 3 + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_checkpoint]
+  rw [show (n + 3 + Q.length + P.length) + 1 = (n + 2 + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_checkpoint]
+  rw [show (n + 2 + Q.length + P.length) + 1 = (n + 1 + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_checkpoint]
+  rw [show (n + 1 + Q.length + P.length) + 1 = (n + Q.length + P.length) + 2 from by omega]
+  rw [exec_block_reassign_cons]
+  simp only [insert_checkpoint]
+  rw [show (n + Q.length + P.length) + 1 = (n + 1 + Q.length) + P.length from by omega]
+  rw [exec_block_append P _ (n + 1 + Q.length) co (State.Checkpoint j)]
+  rw [(hP.passthrough_of_le (n + 1 + Q.length + P.length) (by omega) co).2 j]
+  dsimp only
+  rw [exec_block_append Q S (n + 1) co (State.Checkpoint j)]
+  rw [(hQ.passthrough_of_le (n + 1 + Q.length) (by omega) co).2 j]
+
+/-- The interleaved four-statement fragments agree from a `Checkpoint`
+    starting state, for the same reason as `fragment_four_outOfFuel_eq`. -/
+lemma fragment_four_checkpoint_eq
+    (n : ℕ) (co : Option YulContract) (j : Jump)
+    (P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hS : AgreesOnABEventually S varA varB)
+    (hnP : hP.threshold ≤ n) (hnQ : hQ.threshold ≤ n) (hnS : hS.threshold ≤ n) :
+    exec (n + 5 + Q.length + P.length)
+        (.Block (tempSwapInterleaved [] P Q S tmp varA varB)) co (State.Checkpoint j)
+      = exec (n + 5 + Q.length + P.length)
+        (.Block (simulSwapFourInterleaved [] P Q S v1 v2 varA varB)) co (State.Checkpoint j) := by
+  rw [show n + 5 + Q.length + P.length = (n + 1) + 4 + Q.length + P.length from by omega]
+  rw [lhs_fragment_four_checkpoint (n+1) co j P Q S tmp v1 v2 varA varB hP hQ
+        (by omega) (by omega)]
+  rw [show (n + 1) + 4 + Q.length + P.length = n + 5 + Q.length + P.length from by omega]
+  rw [rhs_fragment_four_checkpoint n co j P Q S tmp v1 v2 varA varB hP hQ hnP hnQ]
+  rw [hS.stable ((n + 1) + 1) (by omega) co (State.Checkpoint j),
+      hS.stable (n + 1) (by omega) co (State.Checkpoint j)]
+
+/-
+  Soundness of the compiler-faithful four-statement single-line-swap
+  transformation.
+
+  `R` is the shared prefix and `S` the shared trailing continuation; `P` and
+  `Q` are the blocks interleaved between the three reassignments of the
+  temporary-based swap (unchanged from `single_line_swap_equiv_general`).
+  Provided `P`, `Q` are isolated from `tmp`, `v1`, `v2`, `varA`, `varB`
+  (`Isolated4`) and `S` is eventually agreeing on `varA`, `varB`
+  (`AgreesOnABEventually`), the temporary-based and four-statement
+  compiler-faithful simultaneous forms are eventually observationally
+  equivalent. This is the professor's requested statement: the right-hand
+  side is exactly `simulSwapFour`, the four-`let` form solc actually emits
+  (via the clean-up Theorems 1 and 2, assumed as part of the trusted
+  computing base, together with the Yul/`solc` fidelity of `simulSwapFour`
+  itself — see its defining comment). -/
+theorem single_line_swap_equiv_four
+    (R P Q S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hAB : varA ≠ varB) (hTA : tmp ≠ varA) (hTB : tmp ≠ varB)
+    (h1A : v1 ≠ varA) (h1B : v1 ≠ varB) (h2A : v2 ≠ varA) (h2B : v2 ≠ varB) (h12 : v1 ≠ v2)
+    (hmem : ∀ (ss : SharedState .Yul) (store : VarStore),
+              varA ∈ (State.Ok ss store).store ∧ varB ∈ (State.Ok ss store).store)
+    (hP : Isolated4 P tmp v1 v2 varA varB) (hQ : Isolated4 Q tmp v1 v2 varA varB)
+    (hS : AgreesOnABEventually S varA varB) :
+    EventuallyObsEquiv
+      (tempSwapInterleaved R P Q S tmp varA varB)
+      (simulSwapFourInterleaved R P Q S v1 v2 varA varB) := by
+  apply eventuallyObsEquiv_of_exec_eventually_eq
+  intro s
+  refine ⟨R.length + 5 + Q.length + P.length + hP.threshold + hQ.threshold + hS.threshold, ?_⟩
+  intro n hn
+  obtain ⟨m, hm⟩ : ∃ m, n = m + R.length := ⟨n - R.length, by omega⟩
+  have hLsplit : tempSwapInterleaved R P Q S tmp varA varB
+      = R ++ tempSwapInterleaved [] P Q S tmp varA varB := by
+    unfold tempSwapInterleaved; simp only [List.nil_append, List.append_assoc]
+  have hRsplit : simulSwapFourInterleaved R P Q S v1 v2 varA varB
+      = R ++ simulSwapFourInterleaved [] P Q S v1 v2 varA varB := by
+    unfold simulSwapFourInterleaved; simp only [List.nil_append, List.append_assoc]
+  rw [hLsplit, hRsplit, hm]
+  rw [exec_block_append R (tempSwapInterleaved [] P Q S tmp varA varB) m .none s]
+  rw [exec_block_append R (simulSwapFourInterleaved [] P Q S v1 v2 varA varB) m .none s]
+  cases hRexec : exec (m + R.length) (.Block R) .none s with
+  | error e => rfl
+  | ok s' =>
+    dsimp only
+    obtain ⟨m', hm'⟩ : ∃ m', m = m' + 5 + Q.length + P.length :=
+      ⟨m - 5 - Q.length - P.length, by omega⟩
+    rw [hm']
+    cases s' with
+    | Ok ss' store' =>
+      exact fragment_four_eventually_eq m' .none ss' store' P Q S tmp v1 v2 varA varB
+        hAB hTA hTB h1A h1B h2A h2B h12 (hmem ss' store').1 (hmem ss' store').2 hP hQ hS
+        (by omega) (by omega) (by omega)
+    | OutOfFuel =>
+      exact fragment_four_outOfFuel_eq m' .none P Q S tmp v1 v2 varA varB hP hQ hS
+        (by omega) (by omega) (by omega)
+    | Checkpoint j =>
+      exact fragment_four_checkpoint_eq m' .none j P Q S tmp v1 v2 varA varB hP hQ hS
+        (by omega) (by omega) (by omega)
+
+/-
+  Sanity check: the four-statement theorem is not vacuous, and specialises to
+  a gas-abstracted form of a consecutive-swap result when the interleaved
+  blocks `P`, `Q` are trivial. The empty block is `Isolated4` for any five
+  names, by the same trivial argument as `isolated_nil`.
+-/
+
+/-- The empty block is (trivially) `Isolated4` from any five names: it reads
+    and writes nothing. -/
+def isolated4_nil (tmp v1 v2 varA varB : Identifier) :
+    Isolated4 ([] : List Stmt) tmp v1 v2 varA varB where
+  commTmp := by intro fuel co ss store val; cases fuel <;> simp only [Yul.exec]
+  commV1  := by intro fuel co ss store val; cases fuel <;> simp only [Yul.exec]
+  commV2  := by intro fuel co ss store val; cases fuel <;> simp only [Yul.exec]
+  commA   := by intro fuel co ss store val; cases fuel <;> simp only [Yul.exec]
+  commB   := by intro fuel co ss store val; cases fuel <;> simp only [Yul.exec]
+  threshold := 1
+  stable := by
+    intro fuel hfuel co s
+    obtain ⟨k, rfl⟩ : ∃ k, fuel = k + 1 := ⟨fuel - 1, by omega⟩
+    simp only [Yul.exec]
+  okOut := by
+    intro co ss store s' hex
+    simp only [Yul.exec] at hex
+    injection hex with h
+    exact ⟨ss, store, h.symm⟩
+  passthrough := by
+    intro co
+    refine ⟨by simp only [Yul.exec], fun j => by simp only [Yul.exec]⟩
+
+/-- The four-statement theorem, specialised to trivial interleaved blocks,
+    recovers (in gas-abstracted form) the soundness of the consecutive
+    compiler-faithful single-line-swap transformation. This witnesses that the
+    `Isolated4` proviso is satisfiable — the theorem is not vacuous. -/
+theorem single_line_swap_equiv_four_nil
+    (R S : List Stmt) (tmp v1 v2 varA varB : Identifier)
+    (hAB : varA ≠ varB) (hTA : tmp ≠ varA) (hTB : tmp ≠ varB)
+    (h1A : v1 ≠ varA) (h1B : v1 ≠ varB) (h2A : v2 ≠ varA) (h2B : v2 ≠ varB) (h12 : v1 ≠ v2)
+    (hmem : ∀ (ss : SharedState .Yul) (store : VarStore),
+              varA ∈ (State.Ok ss store).store ∧ varB ∈ (State.Ok ss store).store)
+    (hS : AgreesOnABEventually S varA varB) :
+    EventuallyObsEquiv
+      (R ++ tempSwap tmp varA varB ++ S)
+      (R ++ simulSwapFour v1 v2 varA varB ++ S) := by
+  have h := single_line_swap_equiv_four R [] [] S tmp v1 v2 varA varB
+    hAB hTA hTB h1A h1B h2A h2B h12 hmem
+    (isolated4_nil tmp v1 v2 varA varB) (isolated4_nil tmp v1 v2 varA varB) hS
+  simpa only [tempSwapInterleaved, simulSwapFourInterleaved, tempSwap, simulSwapFour,
+    List.nil_append, List.append_nil, List.append_assoc] using h
+
 end Law2
